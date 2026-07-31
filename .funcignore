@@ -1,0 +1,11 @@
+.git*
+.github/
+.vscode/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+local.settings.json
+README.md
+tests/

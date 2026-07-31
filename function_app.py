@@ -13,7 +13,7 @@ app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
 IRAIL_URL = "https://api.irail.be/liveboard/"
 
-DEFAULT_STATION = "Gent-Sint-Pieters"
+DEFAULT_STATION = "Brussel-Centraal/Bruxelles-Central"
 
 
 def get_sql_connection() -> pyodbc.Connection:

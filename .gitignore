@@ -221,3 +221,5 @@ __marimo__/
 local.settings.json
 
 .DS_Store
+
+.python_packages

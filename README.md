@@ -32,6 +32,208 @@ Azure SQL Database
 
 ---
 
+## Data Flow
+
+The project processes train data through the following pipeline:
+
+```text
+HTTP Client
+    |
+    v
+Azure Function: GetLiveboard
+    |
+    v
+iRail Liveboard API
+    |
+    v
+JSON Validation and Transformation
+    |
+    v
+Azure SQL Database
+    |
+    +-- stations
+    +-- vehicles
+    +-- liveboard_records
+```
+
+### 1. HTTP Request
+
+The process starts when a client sends an HTTP request to the `GetLiveboard` Function.
+
+Example:
+
+```bash
+curl -sS -G \
+  "http://localhost:7071/api/GetLiveboard" \
+  --data-urlencode "station=Gent-Sint-Pieters"
+```
+
+The station name is provided through the `station` query parameter.
+
+When no station is provided, the Function can use `Gent-Sint-Pieters` as the default station.
+
+### 2. iRail API Request
+
+The Azure Function sends a request to the iRail liveboard endpoint:
+
+```text
+https://api.irail.be/liveboard/
+```
+
+The request includes parameters such as:
+
+```text
+station
+format=json
+lang=en
+arrdep=departure
+```
+
+Example Python logic:
+
+```python
+response = requests.get(
+    "https://api.irail.be/liveboard/",
+    params={
+        "station": station_name,
+        "format": "json",
+        "lang": "en",
+        "arrdep": "departure"
+    },
+    timeout=30
+)
+
+data = response.json()
+```
+
+The iRail API returns live station and departure information as JSON.
+
+### 3. Data Transformation
+
+The Function does not store the complete API response as one large JSON object.
+
+Instead, it extracts the required fields and separates them into three entities:
+
+```text
+Station
+Vehicle
+Liveboard record
+```
+
+The main field mapping is:
+
+| iRail data            | Azure SQL column                        |
+| --------------------- | --------------------------------------- |
+| Station ID            | `stations.station_id`                   |
+| Station name          | `stations.station_name`                 |
+| Standard station name | `stations.standard_name`                |
+| Longitude             | `stations.longitude`                    |
+| Latitude              | `stations.latitude`                     |
+| Vehicle ID            | `vehicles.vehicle_id`                   |
+| Vehicle name          | `vehicles.vehicle_name`                 |
+| Destination           | `liveboard_records.destination`         |
+| Departure time        | `liveboard_records.scheduled_departure` |
+| Delay                 | `liveboard_records.delay_seconds`       |
+| Platform              | `liveboard_records.platform`            |
+| Canceled status       | `liveboard_records.canceled`            |
+
+Unix timestamps returned by iRail are converted into SQL-compatible date and time values before insertion.
+
+### 4. Database Connection
+
+The Function reads the Azure SQL connection string from an environment variable:
+
+```python
+connection_string = os.environ["SQL_CONNECTION_STRING"]
+```
+
+During local development, the value is stored in:
+
+```text
+local.settings.json
+```
+
+After deployment, the value is configured in:
+
+```text
+Azure Function App
+→ Settings
+→ Environment variables
+```
+
+The SQL password is never hardcoded in the source code.
+
+### 5. Normalized Database Storage
+
+The transformed data is stored in three normalized tables.
+
+#### `stations`
+
+Stores one row for each station.
+
+#### `vehicles`
+
+Stores one row for each train vehicle.
+
+#### `liveboard_records`
+
+Stores individual departure observations and references the station and vehicle through foreign keys.
+
+The relationships are:
+
+```text
+stations
+    1
+    |
+    | station_id
+    |
+    n
+liveboard_records
+    n
+    |
+    | vehicle_id
+    |
+    1
+vehicles
+```
+
+This design reduces duplicated station and vehicle information.
+
+### 6. HTTP Response
+
+After the SQL transaction is completed, the Function returns a JSON response similar to:
+
+```json
+{
+  "success": true,
+  "station_requested": "Gent-Sint-Pieters",
+  "source": "iRail",
+  "database": {
+    "stations_processed": 1,
+    "vehicles_processed": 20,
+    "records_inserted": 20
+  }
+}
+```
+
+The exact number of departures depends on the current iRail liveboard response.
+
+### Complete Flow
+
+```text
+1. Client sends station name
+2. Azure Function receives the request
+3. Function calls the iRail API
+4. iRail returns liveboard JSON
+5. Function validates and transforms the data
+6. Function reads the SQL connection string from the environment
+7. Station data is inserted or updated
+8. Vehicle data is inserted or updated
+9. Departure records are inserted
+10. The SQL transaction is committed
+11. Function returns a JSON result
+```
+
 # Technologies
 
 - Python 3.10+
@@ -48,7 +250,9 @@ Azure SQL Database
 
 ```
 railpulse-challenge-azure/
-│
+├── .github/
+│   └── workflows/
+│       └── deploy-function.yml
 ├── function_app.py
 ├── host.json
 ├── local.settings.json
@@ -300,6 +504,8 @@ Functions:
 # Test the HTTP Endpoint
 
 Request a liveboard for Brussels-Central:
+Get the station standard name from here: https://api.irail.be/v1/stations
+Then check the result with this: https://api.irail.be/v1/liveboard?station=Gent-Sint-Pieters&format=json
 
 ```bash
 curl "http://localhost:7071/api/GetLiveboard?station=Brussels-Central"

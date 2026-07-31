@@ -580,58 +580,6 @@ The pipeline primarily extracts:
 
 ---
 
-## 9.1 Finding a Station ID
-
-The station ID can be retrieved from:
-
-```text
-https://api.irail.be/stations/?format=json&lang=en
-```
-
-Example station object:
-
-```json
-{
-  "@id": "http://irail.be/stations/NMBS/008813003",
-  "id": "BE.NMBS.008813003",
-  "name": "Brussels-Central",
-  "locationX": "4.356801",
-  "locationY": "50.845658",
-  "standardname": "Brussel-Centraal/Bruxelles-Central"
-}
-```
-
-The `id` is provided by the iRail station API. It is not manually created by this project.
-
----
-
-## 9.2 Known Brussels-Central Issue
-
-During development, the iRail liveboard API returned:
-
-```json
-{
-  "exception": "NullPointerException",
-  "message": null,
-  "at": "",
-  "stackTrace": []
-}
-```
-
-for Brussels-Central, even though the station exists in the station list.
-
-Because the challenge asks for a major station “like Brussels-Central,” the pipeline uses:
-
-```text
-Gent-Sint-Pieters
-```
-
-as the default station when Brussels-Central is unavailable.
-
-The station remains configurable through the HTTP query parameter.
-
----
-
 # 10. Local Environment Variables
 
 Open:
@@ -763,6 +711,13 @@ Functions:
 Open a second Terminal window.
 
 Test the default working station:
+
+```bash
+curl -sS -G \
+  "http://localhost:7071/api/GetLiveboard" \
+  --data-urlencode "station=Brussel-Centraal/Bruxelles-Central" \
+  | python3 -m json.tool
+```
 
 ```bash
 curl -sS -G \
