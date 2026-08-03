@@ -1,3 +1,4 @@
+```yaml
 name: Deploy Azure Function
 
 on:
@@ -5,17 +6,17 @@ on:
     branches:
       - main
 
-  # Cho phép chạy thủ công từ GitHub Actions
+  # Allow manual execution from GitHub Actions
   workflow_dispatch:
 
 env:
-  # Thay bằng tên Azure Function App thật của bạn
+  # Replace with your actual Azure Function App name
   AZURE_FUNCTIONAPP_NAME: "railpulse-function-fjb6akbnbhbubuhv"
 
-  # Project Azure Function nằm tại root repository
+  # Azure Function project is located at the repository root
   AZURE_FUNCTIONAPP_PACKAGE_PATH: "."
 
-  # Phải khớp với Python version của Function App
+  # Must match the Python version configured for the Function App
   PYTHON_VERSION: "3.11"
 
 jobs:
@@ -24,29 +25,29 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Bước 1: tải source code từ repository
+      # Step 1: Check out the source code from the repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Bước 2: cài đúng phiên bản Python
+      # Step 2: Set up the required Python version
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
-      # Bước 3: cài dependencies để kiểm tra project
+      # Step 3: Install project dependencies for validation
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Bước 4: kiểm tra lỗi cú pháp Python
+      # Step 4: Validate Python syntax
       - name: Validate Python syntax
         run: |
           python -m compileall function_app.py
 
-      # Bước 5: deploy lên Azure Function Flex Consumption
+      # Step 5: Deploy to Azure Functions Flex Consumption
       - name: Deploy to Azure Functions
         uses: Azure/functions-action@v1
         with:
@@ -54,11 +55,12 @@ jobs:
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
           publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
 
-          # Bắt buộc khi Flex Consumption dùng publish profile
+          # Required when using a publish profile with Flex Consumption
           sku: flexconsumption
 
-          # Azure cài requirements.txt bằng remote Oryx build
+          # Let Azure install requirements.txt using remote Oryx build
           remote-build: true
 
-          # Áp dụng các file/folder trong .funcignore
+          # Apply the rules defined in .funcignore
           respect-funcignore: true
+```
