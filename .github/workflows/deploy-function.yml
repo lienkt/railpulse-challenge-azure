@@ -1,22 +1,17 @@
-```yaml
 name: Deploy Azure Function
 
 on:
   push:
     branches:
       - main
-
-  # Allow manual execution from GitHub Actions
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
-  # Replace with your actual Azure Function App name
-  AZURE_FUNCTIONAPP_NAME: "railpulse-function"
-
-  # Azure Function project is located at the repository root
-  AZURE_FUNCTIONAPP_PACKAGE_PATH: "."
-
-  # Must match the Python version configured for the Function App
+  AZURE_FUNCTIONAPP_NAME: railpulse-function
+  AZURE_FUNCTIONAPP_PACKAGE_PATH: .
   PYTHON_VERSION: "3.11"
 
 jobs:
@@ -25,42 +20,29 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Step 1: Check out the source code from the repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Step 2: Set up the required Python version
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          cache: pip
 
-      # Step 3: Install project dependencies for validation
-      - name: Install dependencies
+      - name: Verify project files
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          test -f host.json
+          test -f function_app.py
+          test -f requirements.txt
 
-      # Step 4: Validate Python syntax
       - name: Validate Python syntax
-        run: |
-          python -m compileall function_app.py
+        run: python -m compileall -q function_app.py
 
-      # Step 5: Deploy to Azure Functions Flex Consumption
       - name: Deploy to Azure Functions
         uses: Azure/functions-action@v1
         with:
           app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
           publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
-
-          # Required when using a publish profile with Flex Consumption
           sku: flexconsumption
-
-          # Let Azure install requirements.txt using remote Oryx build
-          remote-build: true
-
-          # Apply the rules defined in .funcignore
-          respect-funcignore: true
-```
+          remote-build: "true"
+          respect-funcignore: "true"
