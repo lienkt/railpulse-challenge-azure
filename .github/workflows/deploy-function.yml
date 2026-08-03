@@ -11,7 +11,7 @@ on:
 
 env:
   # Replace with your actual Azure Function App name
-  AZURE_FUNCTIONAPP_NAME: "railpulse-function-fjb6akbnbhbubuhv"
+  AZURE_FUNCTIONAPP_NAME: "railpulse-function"
 
   # Azure Function project is located at the repository root
   AZURE_FUNCTIONAPP_PACKAGE_PATH: "."
