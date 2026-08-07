@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -44,25 +45,62 @@ def parse_unix_datetime(value: Any) -> datetime | None:
         return None
 
 
+def to_optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+
+    return str(value)
+
+
+def to_optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def to_optional_text_from_mapping(value: Any, *keys: str) -> str | None:
+    if isinstance(value, dict):
+        for key in keys:
+            text = to_optional_str(value.get(key))
+
+            if text:
+                return text
+
+        return None
+
+    return to_optional_str(value)
+
+
 def extract_station(data: dict[str, Any]) -> dict[str, Any]:
-    station_info = data.get("stationinfo") or {}
+    station_info = data.get("stationinfo")
+
+    if not isinstance(station_info, dict):
+        station_info = {}
 
     station_id = (
-        station_info.get("id")
-        or data.get("station")
+        to_optional_str(station_info.get("id"))
+        or to_optional_str(data.get("station"))
         or "UNKNOWN_STATION"
+    )
+    station_name = (
+        to_optional_str(station_info.get("name"))
+        or to_optional_str(data.get("station"))
+        or "Unknown station"
     )
 
     return {
-        "station_id": str(station_id),
-        "station_name": str(
-            station_info.get("name")
-            or data.get("station")
-            or "Unknown station"
+        "station_id": station_id,
+        "station_name": station_name,
+        "standard_name": to_optional_str(
+            station_info.get("standardname")
         ),
-        "standard_name": station_info.get("standardname"),
-        "longitude": station_info.get("locationX"),
-        "latitude": station_info.get("locationY"),
+        "longitude": to_optional_float(station_info.get("locationX")),
+        "latitude": to_optional_float(station_info.get("locationY")),
+        "station_link": to_optional_str(station_info.get("@id")),
     }
 
 
@@ -76,6 +114,218 @@ def extract_departures(data: dict[str, Any]) -> list[dict[str, Any]]:
     return departures
 
 
+def extract_destination(departure: dict[str, Any]) -> str | None:
+    return to_optional_text_from_mapping(
+        departure.get("station"),
+        "name",
+        "standardname",
+        "id",
+    )
+
+
+def extract_platform(departure: dict[str, Any]) -> str | None:
+    return to_optional_text_from_mapping(
+        departure.get("platform"),
+        "name",
+        "number",
+    )
+
+
+def extract_vehicle_from_departure(
+    departure: dict[str, Any],
+) -> dict[str, str | None] | None:
+    vehicle_info = departure.get("vehicleinfo")
+
+    if not isinstance(vehicle_info, dict):
+        return None
+
+    vehicle_id = vehicle_info.get("name")
+
+    if not vehicle_id:
+        return None
+
+    return {
+        "id": str(vehicle_id),
+        "link": to_optional_str(vehicle_info.get("@id")),
+        "short_name": to_optional_str(
+            vehicle_info.get("shortname")
+        ),
+        "vehicle_type": to_optional_str(
+            vehicle_info.get("type")
+        ),
+        "vehicle_number": to_optional_str(
+            vehicle_info.get("number")
+        ),
+    }
+
+
+def extract_vehicle_class_code(vehicle_type: str | None) -> str | None:
+    if not vehicle_type:
+        return None
+
+    class_match = re.match(r"[A-Za-z]+", vehicle_type.strip())
+
+    if not class_match:
+        return None
+
+    return class_match.group(0).upper()
+
+
+def upsert_station(cursor: pyodbc.Cursor, station: dict[str, Any]) -> None:
+    cursor.execute(
+        """
+        MERGE dbo.stations AS target
+        USING (VALUES (?, ?, ?, ?, ?, ?)) AS source (
+            station_id,
+            station_name,
+            standard_name,
+            longitude,
+            latitude,
+            link
+        )
+        ON target.station_id = source.station_id
+        WHEN MATCHED THEN
+            UPDATE SET
+                station_name = source.station_name,
+                standard_name = source.standard_name,
+                longitude = source.longitude,
+                latitude = source.latitude,
+                link = source.link
+        WHEN NOT MATCHED THEN
+            INSERT (
+                station_id,
+                station_name,
+                standard_name,
+                longitude,
+                latitude,
+                link
+            )
+            VALUES (
+                source.station_id,
+                source.station_name,
+                source.standard_name,
+                source.longitude,
+                source.latitude,
+                source.link
+            );
+        """,
+        station["station_id"],
+        station["station_name"],
+        station["standard_name"],
+        station["longitude"],
+        station["latitude"],
+        station["station_link"],
+    )
+
+
+def upsert_vehicle(cursor: pyodbc.Cursor, vehicle: dict[str, str | None]) -> None:
+    cursor.execute(
+        """
+        MERGE dbo.vehicles AS target
+        USING (VALUES (?, ?, ?, ?, ?, ?)) AS source (
+            id,
+            short_name,
+            vehicle_type,
+            vehicle_class_code,
+            vehicle_number,
+            link
+        )
+        ON target.id = source.id
+        WHEN MATCHED THEN
+            UPDATE SET
+                short_name = source.short_name,
+                vehicle_type = source.vehicle_type,
+                vehicle_class_code = source.vehicle_class_code,
+                vehicle_number = source.vehicle_number,
+                link = source.link
+        WHEN NOT MATCHED THEN
+            INSERT (
+                id,
+                short_name,
+                vehicle_type,
+                vehicle_class_code,
+                vehicle_number,
+                link
+            )
+            VALUES (
+                source.id,
+                source.short_name,
+                source.vehicle_type,
+                source.vehicle_class_code,
+                source.vehicle_number,
+                source.link
+            );
+        """,
+        vehicle["id"],
+        vehicle["short_name"],
+        vehicle["vehicle_type"],
+        extract_vehicle_class_code(vehicle["vehicle_type"]),
+        vehicle["vehicle_number"],
+        vehicle["link"],
+    )
+
+
+def upsert_liveboard_record(
+    cursor: pyodbc.Cursor,
+    station_id: str,
+    vehicle_id: str,
+    destination: str | None,
+    scheduled_departure: datetime | None,
+    delay_seconds: int,
+    platform: str | None,
+    canceled: bool,
+) -> None:
+    cursor.execute(
+        """
+        MERGE dbo.liveboard_records AS target
+        USING (VALUES (?, ?, ?, ?, ?, ?, ?)) AS source (
+            station_id,
+            vehicle_id,
+            destination,
+            scheduled_departure,
+            delay_seconds,
+            platform,
+            canceled
+        )
+        ON target.station_id = source.station_id
+           AND target.vehicle_id = source.vehicle_id
+           AND target.scheduled_departure = source.scheduled_departure
+        WHEN MATCHED THEN
+            UPDATE SET
+                destination = source.destination,
+                delay_seconds = source.delay_seconds,
+                platform = source.platform,
+                canceled = source.canceled
+        WHEN NOT MATCHED THEN
+            INSERT (
+                station_id,
+                vehicle_id,
+                destination,
+                scheduled_departure,
+                delay_seconds,
+                platform,
+                canceled
+            )
+            VALUES (
+                source.station_id,
+                source.vehicle_id,
+                source.destination,
+                source.scheduled_departure,
+                source.delay_seconds,
+                source.platform,
+                source.canceled
+            );
+        """,
+        station_id,
+        vehicle_id,
+        destination,
+        scheduled_departure,
+        delay_seconds,
+        platform,
+        canceled,
+    )
+
+
 def save_liveboard_to_sql(data: dict[str, Any]) -> dict[str, int]:
     station = extract_station(data)
     departures = extract_departures(data)
@@ -87,114 +337,22 @@ def save_liveboard_to_sql(data: dict[str, Any]) -> dict[str, int]:
     processed_vehicles = 0
 
     try:
-        # Insert or update station.
-        cursor.execute(
-            """
-            UPDATE dbo.stations
-            SET
-                station_name = ?,
-                standard_name = ?,
-                longitude = ?,
-                latitude = ?
-            WHERE station_id = ?;
-
-            IF @@ROWCOUNT = 0
-            BEGIN
-                INSERT INTO dbo.stations (
-                    station_id,
-                    station_name,
-                    standard_name,
-                    longitude,
-                    latitude
-                )
-                VALUES (?, ?, ?, ?, ?);
-            END;
-            """,
-            station["station_name"],
-            station["standard_name"],
-            station["longitude"],
-            station["latitude"],
-            station["station_id"],
-            station["station_id"],
-            station["station_name"],
-            station["standard_name"],
-            station["longitude"],
-            station["latitude"],
-        )
+        upsert_station(cursor, station)
 
         for departure in departures:
-            vehicle_value = departure.get("vehicle")
+            vehicle = extract_vehicle_from_departure(departure)
 
-            if isinstance(vehicle_value, dict):
-                vehicle_id = (
-                    vehicle_value.get("id")
-                    or vehicle_value.get("name")
-                )
-                vehicle_name = (
-                    vehicle_value.get("name")
-                    or vehicle_value.get("id")
-                )
-            else:
-                vehicle_id = vehicle_value
-                vehicle_name = vehicle_value
-
-            if not vehicle_id:
+            if not vehicle:
                 logging.warning(
-                    "Skipping departure because vehicle ID is missing."
+                    "Skipping departure because vehicleinfo is missing required data."
                 )
                 continue
 
-            vehicle_id = str(vehicle_id)
-            vehicle_name = (
-                str(vehicle_name)
-                if vehicle_name is not None
-                else vehicle_id
-            )
+            vehicle_id = vehicle["id"]
 
-            # Insert or update vehicle.
-            cursor.execute(
-                """
-                UPDATE dbo.vehicles
-                SET vehicle_name = ?
-                WHERE vehicle_id = ?;
-
-                IF @@ROWCOUNT = 0
-                BEGIN
-                    INSERT INTO dbo.vehicles (
-                        vehicle_id,
-                        vehicle_name
-                    )
-                    VALUES (?, ?);
-                END;
-                """,
-                vehicle_name,
-                vehicle_id,
-                vehicle_id,
-                vehicle_name,
-            )
+            upsert_vehicle(cursor, vehicle)
 
             processed_vehicles += 1
-
-            destination_value = departure.get("station")
-
-            if isinstance(destination_value, dict):
-                destination = (
-                    destination_value.get("name")
-                    or destination_value.get("standardname")
-                    or destination_value.get("id")
-                )
-            else:
-                destination = destination_value
-
-            platform_value = departure.get("platform")
-
-            if isinstance(platform_value, dict):
-                platform = (
-                    platform_value.get("name")
-                    or platform_value.get("number")
-                )
-            else:
-                platform = platform_value
 
             scheduled_departure = parse_unix_datetime(
                 departure.get("time")
@@ -212,26 +370,15 @@ def save_liveboard_to_sql(data: dict[str, Any]) -> dict[str, int]:
                 "yes",
             }
 
-            cursor.execute(
-                """
-                INSERT INTO dbo.liveboard_records (
-                    station_id,
-                    vehicle_id,
-                    destination,
-                    scheduled_departure,
-                    delay_seconds,
-                    platform,
-                    canceled
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?);
-                """,
-                station["station_id"],
-                vehicle_id,
-                str(destination) if destination else None,
-                scheduled_departure,
-                delay_seconds,
-                str(platform) if platform else None,
-                canceled,
+            upsert_liveboard_record(
+                cursor=cursor,
+                station_id=station["station_id"],
+                vehicle_id=vehicle_id,
+                destination=extract_destination(departure),
+                scheduled_departure=scheduled_departure,
+                delay_seconds=delay_seconds,
+                platform=extract_platform(departure),
+                canceled=canceled,
             )
 
             inserted_records += 1

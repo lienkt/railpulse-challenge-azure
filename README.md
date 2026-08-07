@@ -70,7 +70,7 @@ curl -sS -G \
 
 The station name is provided through the `station` query parameter.
 
-When no station is provided, the Function can use `Gent-Sint-Pieters` as the default station.
+When no station is provided, the Function uses `Brussel-Centraal/Bruxelles-Central` as the default station.
 
 ### 2. iRail API Request
 
@@ -127,10 +127,15 @@ The main field mapping is:
 | Station ID            | `stations.station_id`                   |
 | Station name          | `stations.station_name`                 |
 | Standard station name | `stations.standard_name`                |
-| Longitude             | `stations.longitude`                    |
-| Latitude              | `stations.latitude`                     |
-| Vehicle ID            | `vehicles.vehicle_id`                   |
-| Vehicle name          | `vehicles.vehicle_name`                 |
+| Longitude             | `stations.longitude` (DECIMAL(10,6))    |
+| Latitude              | `stations.latitude` (DECIMAL(10,6))     |
+| Station link (`@id`)  | `stations.link`                         |
+| Vehicle ID            | `vehicles.id`                           |
+| Vehicle short name    | `vehicles.short_name`                   |
+| Vehicle type          | `vehicles.vehicle_type`                 |
+| Vehicle class code    | `vehicles.vehicle_class_code`           |
+| Vehicle number        | `vehicles.vehicle_number`               |
+| Vehicle link (`@id`)  | `vehicles.link`                         |
 | Destination           | `liveboard_records.destination`         |
 | Departure time        | `liveboard_records.scheduled_departure` |
 | Delay                 | `liveboard_records.delay_seconds`       |
@@ -177,7 +182,7 @@ Stores one row for each train vehicle.
 
 #### `liveboard_records`
 
-Stores individual departure observations and references the station and vehicle through foreign keys.
+Stores individual departure observations and references the station and vehicle through foreign keys. Duplicate rows are prevented with a unique key on `(station_id, vehicle_id, scheduled_departure)`.
 
 The relationships are:
 
@@ -229,7 +234,7 @@ The exact number of departures depends on the current iRail liveboard response.
 6. Function reads the SQL connection string from the environment
 7. Station data is inserted or updated
 8. Vehicle data is inserted or updated
-9. Departure records are inserted
+9. Departure records are inserted or updated
 10. The SQL transaction is committed
 11. Function returns a JSON result
 ```
@@ -257,6 +262,8 @@ railpulse-challenge-azure/
 ├── host.json
 ├── local.settings.json
 ├── requirements.txt
+├── migrations/
+│   └── sql_reset_and_recreate.sql
 ├── .venv/
 └── README.md
 ```
@@ -291,6 +298,7 @@ Stores station information.
 | standard_name | Official multilingual name |
 | longitude     | Longitude                  |
 | latitude      | Latitude                   |
+| link          | iRail station `@id` URL    |
 
 ---
 
@@ -298,10 +306,14 @@ Stores station information.
 
 Stores train information.
 
-| Column       | Description      |
-| ------------ | ---------------- |
-| vehicle_id   | Primary Key      |
-| vehicle_name | Train identifier |
+| Column             | Description                            |
+| ------------------ | -------------------------------------- |
+| id                 | Primary Key from `vehicleinfo.name`    |
+| short_name         | Train short name                       |
+| vehicle_type       | Raw train type from iRail              |
+| vehicle_class_code | Normalized class code (`S`, `IC`, ...) |
+| vehicle_number     | Train number from iRail                |
+| link               | iRail vehicle `@id` URL                |
 
 ---
 
@@ -309,17 +321,18 @@ Stores train information.
 
 Stores live departure records.
 
-| Column              | Description                    |
-| ------------------- | ------------------------------ |
-| record_id           | Primary Key                    |
-| station_id          | Foreign Key → stations         |
-| vehicle_id          | Foreign Key → vehicles         |
-| destination         | Destination station            |
-| scheduled_departure | Scheduled departure time       |
-| delay_seconds       | Delay in seconds               |
-| platform            | Platform number                |
-| canceled            | Cancellation status            |
-| fetched_at          | Timestamp when data was stored |
+| Column              | Description              |
+| ------------------- | ------------------------ |
+| record_id           | Primary Key              |
+| station_id          | Foreign Key → stations   |
+| vehicle_id          | Foreign Key → vehicles   |
+| destination         | Destination station      |
+| scheduled_departure | Scheduled departure time |
+| delay_seconds       | Delay in seconds         |
+| platform            | Platform number          |
+| canceled            | Cancellation status      |
+
+The table is protected by a unique index on `(station_id, vehicle_id, scheduled_departure)` so repeated calls update the same departure instead of inserting duplicates.
 
 This schema avoids duplicated station and vehicle information by storing them only once and referencing them using foreign keys.
 
@@ -525,6 +538,55 @@ curl -s "http://localhost:7071/api/GetLiveboard?station=Gent-Sint-Pieters" | pyt
 
 ```bash
 curl -s "http://localhost:7071/api/GetLiveboard?station=Antwerpen-Centraal" | python3 -m json.tool
+```
+
+### Batch Update for Major Belgian Stations
+
+You can trigger updates in batch for major stations by looping over a station list.
+
+```bash
+BASE_URL="http://localhost:7071/api/GetLiveboard"
+
+stations=(
+  "Brussel-Centraal/Bruxelles-Central"
+  "Brussel-Zuid/Bruxelles-Midi"
+  "Brussel-Noord/Bruxelles-Nord"
+  "Antwerpen-Centraal"
+  "Gent-Sint-Pieters"
+  "Leuven"
+  "Liege-Guillemins"
+  "Brugge"
+  "Namur"
+  "Mechelen"
+)
+
+for station in "${stations[@]}"; do
+  echo "Updating: $station"
+  curl -sS -G "$BASE_URL" \
+    --data-urlencode "station=$station" \
+    | python3 -m json.tool
+
+  # Small delay to avoid sending bursts.
+  sleep 1
+done
+```
+
+If you want to run the same update against your deployed Function App, replace `BASE_URL` with your Azure URL:
+
+```bash
+BASE_URL="https://<YOUR_FUNCTION_APP>.azurewebsites.net/api/GetLiveboard"
+```
+
+Current deployed endpoint example:
+
+```bash
+https://railpulse-function-fjb6akbnbhbubuhv.swedencentral-01.azurewebsites.net/api/GetLiveboard?station=Brussel-Zuid/Bruxelles-Midi
+```
+
+Use this deployed base URL for batch updates:
+
+```bash
+BASE_URL="https://railpulse-function-fjb6akbnbhbubuhv.swedencentral-01.azurewebsites.net/api/GetLiveboard"
 ```
 
 ---
