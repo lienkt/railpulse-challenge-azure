@@ -15,8 +15,6 @@ app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 IRAIL_URL = "https://api.irail.be/liveboard/"
 
 DEFAULT_STATION = "Brussel-Centraal/Bruxelles-Central"
-COLLECTION_STATIONS = [DEFAULT_STATION]
-TIMER_SCHEDULE = "0 */15 * * * *"  # every 15 minutes
 
 
 def get_sql_connection() -> pyodbc.Connection:
@@ -335,7 +333,7 @@ def save_liveboard_to_sql(data: dict[str, Any]) -> dict[str, int]:
     connection = get_sql_connection()
     cursor = connection.cursor()
 
-    processed_records = 0
+    inserted_records = 0
     processed_vehicles = 0
 
     try:
@@ -383,14 +381,14 @@ def save_liveboard_to_sql(data: dict[str, Any]) -> dict[str, int]:
                 canceled=canceled,
             )
 
-            processed_records += 1
+            inserted_records += 1
 
         connection.commit()
 
         return {
             "stations_processed": 1,
             "vehicles_processed": processed_vehicles,
-            "records_processed": processed_records,
+            "records_inserted": inserted_records,
         }
 
     except Exception:
@@ -402,8 +400,15 @@ def save_liveboard_to_sql(data: dict[str, Any]) -> dict[str, int]:
         connection.close()
 
 
-def fetch_liveboard(station: str) -> dict[str, Any]:
-    """Fetch the current departure liveboard for one station."""
+@app.route(
+    route="GetLiveboard",
+    methods=["GET"],
+)
+def get_liveboard(req: func.HttpRequest) -> func.HttpResponse:
+    logging.info("GetLiveboard pipeline started.")
+
+    station = req.params.get("station", DEFAULT_STATION)
+
     params = {
         "station": station,
         "format": "json",
@@ -416,61 +421,42 @@ def fetch_liveboard(station: str) -> dict[str, Any]:
         "User-Agent": "RailPulseChallenge/1.0",
     }
 
-    response = requests.get(
-        IRAIL_URL,
-        params=params,
-        headers=headers,
-        timeout=30,
-        allow_redirects=True,
-    )
-    response.raise_for_status()
-    data = response.json()
-
-    if data.get("exception"):
-        raise RuntimeError(f"iRail returned an exception payload: {data}")
-
-    return data
-
-
-def collect_station(station: str) -> dict[str, int]:
-    """
-    Fetch the current liveboard and upsert it into Azure SQL.
-
-    Existing services are updated by the MERGE key
-    (station_id, vehicle_id, scheduled_departure), so repeated timer runs
-    refresh delay/platform/canceled instead of creating duplicate rows.
-    """
-    logging.info("Collecting current liveboard for %s.", station)
-    data = fetch_liveboard(station)
-    departures_count = len(extract_departures(data))
-    database_result = save_liveboard_to_sql(data)
-
-    return {
-        "api_departures_received": departures_count,
-        "records_processed": database_result["records_processed"],
-        "vehicles_processed": database_result["vehicles_processed"],
-    }
-
-
-@app.route(
-    route="GetLiveboard",
-    methods=["GET"],
-)
-def get_liveboard(req: func.HttpRequest) -> func.HttpResponse:
-    """Manual ingestion endpoint for a single station."""
-    logging.info("Manual GetLiveboard pipeline started.")
-    station = req.params.get("station", DEFAULT_STATION)
-
     try:
-        result = collect_station(station)
+        response = requests.get(
+            IRAIL_URL,
+            params=params,
+            headers=headers,
+            timeout=30,
+            allow_redirects=True,
+        )
+
+        response.raise_for_status()
+        data = response.json()
+
+        if data.get("exception"):
+            return func.HttpResponse(
+                body=json.dumps(
+                    {
+                        "success": False,
+                        "station": station,
+                        "error": "iRail returned an internal error.",
+                        "irail_response": data,
+                    },
+                    ensure_ascii=False,
+                ),
+                status_code=502,
+                mimetype="application/json",
+            )
+
+        database_result = save_liveboard_to_sql(data)
 
         return func.HttpResponse(
             body=json.dumps(
                 {
                     "success": True,
                     "station_requested": station,
-                    "source": "iRail liveboard",
-                    **result,
+                    "source": "iRail",
+                    "database": database_result,
                 },
                 ensure_ascii=False,
                 default=str,
@@ -480,12 +466,12 @@ def get_liveboard(req: func.HttpRequest) -> func.HttpResponse:
         )
 
     except requests.exceptions.Timeout:
-        logging.exception("iRail request timed out for %s.", station)
+        logging.exception("iRail request timed out.")
+
         return func.HttpResponse(
             body=json.dumps(
                 {
                     "success": False,
-                    "station_requested": station,
                     "error": "iRail request timed out.",
                 }
             ),
@@ -494,12 +480,12 @@ def get_liveboard(req: func.HttpRequest) -> func.HttpResponse:
         )
 
     except requests.exceptions.RequestException as exc:
-        logging.exception("Could not retrieve iRail data for %s.", station)
+        logging.exception("Could not retrieve iRail data.")
+
         return func.HttpResponse(
             body=json.dumps(
                 {
                     "success": False,
-                    "station_requested": station,
                     "error": "Could not retrieve iRail data.",
                     "details": str(exc),
                 }
@@ -510,11 +496,11 @@ def get_liveboard(req: func.HttpRequest) -> func.HttpResponse:
 
     except pyodbc.Error as exc:
         logging.exception("Azure SQL operation failed.")
+
         return func.HttpResponse(
             body=json.dumps(
                 {
                     "success": False,
-                    "station_requested": station,
                     "error": "Azure SQL operation failed.",
                     "details": str(exc),
                 }
@@ -524,12 +510,12 @@ def get_liveboard(req: func.HttpRequest) -> func.HttpResponse:
         )
 
     except Exception as exc:
-        logging.exception("Unexpected manual ingestion error.")
+        logging.exception("Unexpected pipeline error.")
+
         return func.HttpResponse(
             body=json.dumps(
                 {
                     "success": False,
-                    "station_requested": station,
                     "error": "Unexpected pipeline error.",
                     "details": str(exc),
                 }
@@ -537,52 +523,3 @@ def get_liveboard(req: func.HttpRequest) -> func.HttpResponse:
             status_code=500,
             mimetype="application/json",
         )
-
-
-@app.timer_trigger(
-    schedule=TIMER_SCHEDULE,
-    arg_name="timer",
-    run_on_startup=False,
-)
-def liveboard_timer(timer: func.TimerRequest) -> None:
-    """
-    Automatically collect the current liveboard every 15 minutes.
-
-    This builds full-day coverage over time using real liveboard observations,
-    rather than querying all 24 historical clock hours in one execution.
-    """
-    if timer.past_due:
-        logging.warning("Liveboard timer is running later than scheduled.")
-
-    logging.info(
-        "Scheduled liveboard ingestion started for %s station(s).",
-        len(COLLECTION_STATIONS),
-    )
-
-    total_api_departures = 0
-    total_records_processed = 0
-    failed_stations: list[str] = []
-
-    for station in COLLECTION_STATIONS:
-        try:
-            result = collect_station(station)
-            total_api_departures += result["api_departures_received"]
-            total_records_processed += result["records_processed"]
-
-            logging.info(
-                "%s: received %s departures and processed %s database records.",
-                station,
-                result["api_departures_received"],
-                result["records_processed"],
-            )
-
-        except Exception:
-            failed_stations.append(station)
-            logging.exception("Scheduled collection failed for %s.", station)
-
-    logging.info(
-        "Scheduled ingestion complete. API departures=%s, records processed=%s, failed stations=%s.",
-        total_api_departures,
-        total_records_processed,
-        failed_stations,
-    )
