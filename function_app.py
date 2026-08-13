@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import azure.functions as func
@@ -17,6 +17,7 @@ IRAIL_URL = "https://api.irail.be/liveboard/"
 DEFAULT_STATION = "Brussel-Centraal/Bruxelles-Central"
 COLLECTION_STATIONS = [DEFAULT_STATION]
 TIMER_SCHEDULE = "0 */15 * * * *"  # every 15 minutes
+DEFAULT_RETENTION_DAYS = 30
 
 
 def get_sql_connection() -> pyodbc.Connection:
@@ -186,7 +187,13 @@ def upsert_station(cursor: pyodbc.Cursor, station: dict[str, Any]) -> None:
             link
         )
         ON target.station_id = source.station_id
-        WHEN MATCHED THEN
+        WHEN MATCHED AND (
+            ISNULL(target.station_name, '') <> ISNULL(source.station_name, '')
+            OR ISNULL(target.standard_name, '') <> ISNULL(source.standard_name, '')
+            OR ISNULL(target.longitude, -999.0) <> ISNULL(source.longitude, -999.0)
+            OR ISNULL(target.latitude, -999.0) <> ISNULL(source.latitude, -999.0)
+            OR ISNULL(target.link, '') <> ISNULL(source.link, '')
+        ) THEN
             UPDATE SET
                 station_name = source.station_name,
                 standard_name = source.standard_name,
@@ -233,7 +240,13 @@ def upsert_vehicle(cursor: pyodbc.Cursor, vehicle: dict[str, str | None]) -> Non
             link
         )
         ON target.id = source.id
-        WHEN MATCHED THEN
+        WHEN MATCHED AND (
+            ISNULL(target.short_name, '') <> ISNULL(source.short_name, '')
+            OR ISNULL(target.vehicle_type, '') <> ISNULL(source.vehicle_type, '')
+            OR ISNULL(target.vehicle_class_code, '') <> ISNULL(source.vehicle_class_code, '')
+            OR ISNULL(target.vehicle_number, '') <> ISNULL(source.vehicle_number, '')
+            OR ISNULL(target.link, '') <> ISNULL(source.link, '')
+        ) THEN
             UPDATE SET
                 short_name = source.short_name,
                 vehicle_type = source.vehicle_type,
@@ -292,7 +305,12 @@ def upsert_liveboard_record(
         ON target.station_id = source.station_id
            AND target.vehicle_id = source.vehicle_id
            AND target.scheduled_departure = source.scheduled_departure
-        WHEN MATCHED THEN
+        WHEN MATCHED AND (
+            ISNULL(target.destination, '') <> ISNULL(source.destination, '')
+            OR ISNULL(target.delay_seconds, -1) <> ISNULL(source.delay_seconds, -1)
+            OR ISNULL(target.platform, '') <> ISNULL(source.platform, '')
+            OR target.canceled <> source.canceled
+        ) THEN
             UPDATE SET
                 destination = source.destination,
                 delay_seconds = source.delay_seconds,
@@ -328,6 +346,52 @@ def upsert_liveboard_record(
     )
 
 
+def get_retention_days() -> int:
+    raw_value = os.environ.get(
+        "LIVEBOARD_RETENTION_DAYS",
+        str(DEFAULT_RETENTION_DAYS),
+    )
+
+    try:
+        retention_days = int(raw_value)
+    except ValueError:
+        logging.warning(
+            "Invalid LIVEBOARD_RETENTION_DAYS=%s. Using default=%s.",
+            raw_value,
+            DEFAULT_RETENTION_DAYS,
+        )
+        return DEFAULT_RETENTION_DAYS
+
+    if retention_days < 0:
+        logging.warning(
+            "LIVEBOARD_RETENTION_DAYS cannot be negative. Using default=%s.",
+            DEFAULT_RETENTION_DAYS,
+        )
+        return DEFAULT_RETENTION_DAYS
+
+    return retention_days
+
+
+def purge_old_liveboard_records(
+    cursor: pyodbc.Cursor,
+    retention_days: int,
+) -> int:
+    if retention_days == 0:
+        return 0
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+
+    cursor.execute(
+        """
+        DELETE FROM dbo.liveboard_records
+        WHERE scheduled_departure < ?;
+        """,
+        cutoff,
+    )
+
+    return max(cursor.rowcount, 0)
+
+
 def save_liveboard_to_sql(data: dict[str, Any]) -> dict[str, int]:
     station = extract_station(data)
     departures = extract_departures(data)
@@ -337,6 +401,8 @@ def save_liveboard_to_sql(data: dict[str, Any]) -> dict[str, int]:
 
     processed_records = 0
     processed_vehicles = 0
+    retention_days = get_retention_days()
+    records_deleted_by_retention = 0
 
     try:
         upsert_station(cursor, station)
@@ -385,12 +451,18 @@ def save_liveboard_to_sql(data: dict[str, Any]) -> dict[str, int]:
 
             processed_records += 1
 
+        records_deleted_by_retention = purge_old_liveboard_records(
+            cursor,
+            retention_days,
+        )
+
         connection.commit()
 
         return {
             "stations_processed": 1,
             "vehicles_processed": processed_vehicles,
             "records_processed": processed_records,
+            "records_deleted_by_retention": records_deleted_by_retention,
         }
 
     except Exception:
@@ -551,6 +623,16 @@ def liveboard_timer(timer: func.TimerRequest) -> None:
     This builds full-day coverage over time using real liveboard observations,
     rather than querying all 24 historical clock hours in one execution.
     """
+
+    enable_update = os.environ.get(
+        "ENABLE_DB_UPDATE",
+        "false"
+    ).lower() == "true"
+
+    if not enable_update:
+        logging.info("Database update is DISABLED.")
+        return
+
     if timer.past_due:
         logging.warning("Liveboard timer is running later than scheduled.")
 
